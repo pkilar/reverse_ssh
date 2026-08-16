@@ -289,14 +289,13 @@ func TestParseOwnerDirective(t *testing.T) {
 
 func TestParseOptions(t *testing.T) {
 	tests := []struct {
-		name         string
-		options      []string
-		wantSingle   bool
-		wantAllow    int
-		wantDeny     int
-		wantOwners   []string
-		wantWarnings int
-		wantErr      bool
+		name       string
+		options    []string
+		wantSingle bool
+		wantAllow  int
+		wantDeny   int
+		wantOwners []string
+		wantErr    bool
 	}{
 		{
 			name:       "single_session",
@@ -351,24 +350,22 @@ func TestParseOptions(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:         "unsupported openssh option warns",
-			options:      []string{"no-pty"},
-			wantWarnings: 1,
+			name:    "unsupported openssh option is rejected",
+			options: []string{"no-pty"},
+			wantErr: true,
 		},
 		{
-			name:         "unsupported option with a value warns",
-			options:      []string{`command="/bin/false"`},
-			wantWarnings: 1,
+			name:    "unsupported option with a value is rejected",
+			options: []string{`command="/bin/false"`},
+			wantErr: true,
 		},
 		{
-			// Pins an accepted tradeoff rather than desirable behaviour: a
-			// misspelling of from= cannot be told apart from an option this server
-			// does not implement, so the key loads with no address restriction and
-			// the warning is the operator's only signal.
-			name:         "misspelled from warns and applies no restriction",
-			options:      []string{`form="10.0.0.0/8"`},
-			wantWarnings: 1,
-			wantAllow:    0,
+			// A misspelling of from= is indistinguishable from an option this
+			// server does not implement, so rejecting unknown options is what
+			// stops it from silently loading a key with no address restriction.
+			name:    "misspelled from is rejected",
+			options: []string{`form="10.0.0.0/8"`},
+			wantErr: true,
 		},
 		{
 			name:       "several options together",
@@ -381,7 +378,7 @@ func TestParseOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			opts, warnings, err := parseOptions(tt.options)
+			opts, err := parseOptions(tt.options)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("parseOptions(%q) succeeded, expected an error", tt.options)
@@ -406,10 +403,6 @@ func TestParseOptions(t *testing.T) {
 
 			if !slices.Equal(opts.Owners, tt.wantOwners) {
 				t.Fatalf("Owners = %q, want %q", opts.Owners, tt.wantOwners)
-			}
-
-			if len(warnings) != tt.wantWarnings {
-				t.Fatalf("got %d warnings %q, want %d", len(warnings), warnings, tt.wantWarnings)
 			}
 		})
 	}
@@ -492,8 +485,14 @@ func TestReadPubKeys(t *testing.T) {
 		}
 	})
 
-	t.Run("a key carrying an unsupported option still loads", func(t *testing.T) {
-		path := writeKeysFile(t, authorizedKeyLine("no-pty", good))
+	t.Run("a key carrying an unsupported option is dropped but others load", func(t *testing.T) {
+		// rssh cannot honour arbitrary authorized_keys options, so a key that
+		// asks for one is rejected rather than loaded with the option ignored.
+		bad := testPublicKey(t)
+		path := writeKeysFile(t,
+			authorizedKeyLine("no-pty", bad),
+			authorizedKeyLine("", good),
+		)
 
 		keys, err := readPubKeys(path)
 		if err != nil {
@@ -502,6 +501,10 @@ func TestReadPubKeys(t *testing.T) {
 
 		if len(keys) != 1 {
 			t.Fatalf("loaded %d keys, want 1", len(keys))
+		}
+
+		if _, ok := keys[string(ssh.MarshalAuthorizedKey(bad))]; ok {
+			t.Fatal("key carrying an unsupported option was loaded anyway")
 		}
 	})
 

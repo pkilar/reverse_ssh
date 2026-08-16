@@ -53,20 +53,16 @@ func readPubKeys(path string) (m map[string]Options, err error) {
 		if err != nil {
 			// Skip only the offending line. Rejecting the whole file would let a
 			// single typo lock out every other key in it.
-			log.Printf("skipping unparsable public key, %s line %d: %s", path, i+1, err)
+			log.Printf("skipping unparsable public key, %q line %d: %s", path, i+1, err)
 			continue
 		}
 
-		opts, warnings, err := parseOptions(options)
+		opts, err := parseOptions(options)
 		if err != nil {
-			// Fail closed. A malformed from= or owner= is the very restriction
-			// the operator was relying on, so the key does not load at all.
-			log.Printf("ignoring key, %s line %d: %s", path, i+1, err)
+			// Fail closed. The key does not load at all, whether the problem is a
+			// malformed from=/owner= or an option this server cannot honour.
+			log.Printf("ignoring key, %q line %d: %s", path, i+1, err)
 			continue
-		}
-
-		for _, warning := range warnings {
-			log.Printf("warning: %s line %d: %s", path, i+1, warning)
 		}
 
 		opts.Comment = comment
@@ -78,41 +74,39 @@ func readPubKeys(path string) (m map[string]Options, err error) {
 }
 
 // parseOptions converts the options of a single authorized_keys line into
-// Options. The options this server implements are validated strictly: a
-// malformed from= or owner= is an error, because a half-parsed restriction is
-// worse than an absent one. Every other option is returned as a warning rather
-// than an error, so that keys carrying OpenSSH options keep working - including
-// options newer than this code, which an allowlist here would wrongly reject.
+// Options. Only the options this server implements are accepted: from=, owner=
+// and single_session. Every other option - a malformed value, or a standard
+// OpenSSH option this server does not honour - rejects the key.
 //
-// Callers must surface those warnings. A misspelling of from= is
-// indistinguishable from an OpenSSH option we simply do not implement, so such
-// a key loads with no address restriction and the warning is the only signal
-// the operator gets.
-func parseOptions(options []string) (opts Options, warnings []string, err error) {
+// Rejecting unsupported options is deliberate. rssh cannot enforce arbitrary
+// authorized_keys options, so silently ignoring one (command= or no-pty, say)
+// would hand back a key that behaves differently from what the operator wrote.
+// A half-parsed from= or owner= is worse still, dropping the restriction they
+// were relying on. Failing closed forces the mistake to surface instead.
+func parseOptions(options []string) (opts Options, err error) {
 	for _, o := range options {
 		rawName, value, hasValue := strings.Cut(o, "=")
 
 		// OpenSSH treats option names as case insensitive. Normalise so that a
-		// From= cannot slip past the from= handling below and end up looking
-		// like an unknown option.
+		// From= is handled as from= rather than rejected as unknown.
 		name := strings.ToLower(strings.TrimSpace(rawName))
 
 		switch name {
 		case "single_session":
 			if hasValue {
-				return opts, warnings, fmt.Errorf("option %q does not take a value", rawName)
+				return opts, fmt.Errorf("option %q does not take a value", rawName)
 			}
 
 			opts.SingleSession = true
 
 		case "from":
 			if !hasValue {
-				return opts, warnings, fmt.Errorf("option %q requires a value", rawName)
+				return opts, fmt.Errorf("option %q requires a value", rawName)
 			}
 
 			deny, allow, err := ParseFromDirective(value)
 			if err != nil {
-				return opts, warnings, fmt.Errorf("invalid from directive %q: %w", value, err)
+				return opts, fmt.Errorf("invalid from directive %q: %w", value, err)
 			}
 
 			opts.AllowList = append(opts.AllowList, allow...)
@@ -120,22 +114,22 @@ func parseOptions(options []string) (opts Options, warnings []string, err error)
 
 		case "owner":
 			if !hasValue {
-				return opts, warnings, fmt.Errorf("option %q requires a value", rawName)
+				return opts, fmt.Errorf("option %q requires a value", rawName)
 			}
 
 			owners, err := ParseOwnerDirective(value)
 			if err != nil {
-				return opts, warnings, fmt.Errorf("invalid owner directive %q: %w", value, err)
+				return opts, fmt.Errorf("invalid owner directive %q: %w", value, err)
 			}
 
 			opts.Owners = owners
 
 		default:
-			warnings = append(warnings, fmt.Sprintf("option %q is not supported and will NOT be enforced", rawName))
+			return opts, fmt.Errorf("unsupported option %q", rawName)
 		}
 	}
 
-	return opts, warnings, nil
+	return opts, nil
 }
 
 // ParseOwnerDirective parses the value of an owner= directive, which must be
